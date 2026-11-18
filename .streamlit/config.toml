@@ -11,14 +11,22 @@ gatherUsageStats = false
 toolbarMode = "minimal"
 
 [theme]
-base = "light"
-primaryColor = "#0D6C59"
-backgroundColor = "#F8F7F2"
-secondaryBackgroundColor = "#EFEEE6"
-textColor = "#1D2926"
-borderColor = "#D6DAD0"
+base = "dark"
+primaryColor = "#C6F36B"
+backgroundColor = "#101311"
+secondaryBackgroundColor = "#191F1B"
+textColor = "#F4F5EF"
+borderColor = "#303830"
 showWidgetBorder = true
-baseRadius = "0.4rem"
-paddingTop = "0.9rem"
+baseRadius = "9px"
+paddingTop = "1.1rem"
 paddingBottom = "2rem"
+baseFontSize = 14
+headingFontSizes = ["1.9rem", "1.45rem", "1.12rem", "1rem", "0.95rem", "0.9rem"]
 font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+
+[theme.sidebar]
+backgroundColor = "#141914"
+secondaryBackgroundColor = "#191F1B"
+textColor = "#F4F5EF"
+borderColor = "#303830"

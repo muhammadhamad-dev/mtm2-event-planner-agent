@@ -36,8 +36,16 @@ def requirements(plan, rules):
     for rule in rules:
         key, operator, expected = (rule[k] for k in ("key", "operator", "value"))
         actual = get(plan, key)
+        if operator != "none" and isinstance(expected, str) and expected.startswith("$"):
+            reference = expected[1:]
+            expected = get(plan, reference)
+            if expected is None:
+                errors.append(f"{key} requires {reference}, which is missing.")
+                continue
         try:
             if operator in ("eq", "ge", "le"):
+                if money(actual) and money(expected):
+                    actual, expected = Decimal(str(actual)), Decimal(str(expected))
                 passed = actual is not None and {"eq": eq, "ge": ge, "le": le}[operator](actual, expected)
             elif operator in ("contains", "excludes"):
                 passed = isinstance(actual, (list, str)) and (
@@ -144,7 +152,11 @@ def schedule_plan(schedule, rules, judging_minutes, deadline):
                 del scheduled[name]
         return False
 
-    schedule_rules = [rule for rule in rules if rule["key"].startswith("schedule.")]
+    schedule_rules = [
+        rule for rule in rules if rule["key"].startswith("schedule.")
+        and (not isinstance(rule["value"], str) or not rule["value"].startswith("$")
+             or rule["value"].startswith("$schedule."))
+    ]
     if not place(0):
         details = "; ".join(f'{rule["key"]} {rule["operator"]} {rule["value"]}'
                             for rule in schedule_rules)
@@ -167,6 +179,12 @@ def build(facts, rules, deadline=float("inf")):
     for fact in sorted(facts.values(), key=lambda item: item["key"]):
         put(data, fact["key"], fact["value"])
     venue, schedule, food, judging, budget = data.values()
+    option_groups = (venue.get("options", {}), food.get("options", {}), schedule.get("activities", {}))
+    if any(not isinstance(group, dict) or any(not isinstance(item, dict) for item in group.values())
+           for group in option_groups):
+        return data, ["Venue options, meal options and schedule activities must specify named fields."]
+    if not isinstance(budget.get("commitments", {}), dict):
+        return data, ["Committed expenses must use separate named amounts."]
     errors = []
     students, judges, team_size, teams, staff, per_team, limit = (
         judging.get(key) for key in (
@@ -181,6 +199,8 @@ def build(facts, rules, deadline=float("inf")):
         errors.append("Need positive student, team and judge counts, judging minutes and teams-per-judge limit.")
     elif teams > judges * limit:
         errors.append(f"{judges} judges can cover only {judges * limit} of {teams} teams.")
+    elif integer(team_size) and team_size and teams * team_size < students:
+        errors.append(f"{teams} teams of {team_size} cannot accommodate {students} students.")
     else:
         waves = (teams + judges - 1) // judges
         judging.update(teams=teams, team_capacity=judges * limit, waves=waves, duration=waves * per_team)
@@ -206,6 +226,8 @@ def build(facts, rules, deadline=float("inf")):
     required_capacity = venue.get("required_capacity", total_people)
     if not integer(required_capacity) or required_capacity <= 0:
         errors.append("Need a positive venue headcount.")
+    elif integer(students) and required_capacity < students:
+        errors.append(f"The venue headcount of {required_capacity} excludes some of the {students} students.")
     cap, honorarium = budget.get("cap"), judging.get("honorarium")
     commitments = budget.get("commitments", {})
     if not money(cap) or not money(honorarium) or not all(map(money, commitments.values())):
@@ -240,7 +262,8 @@ def build(facts, rules, deadline=float("inf")):
             "venue": {**venue, **room, "selected": venue_id, "required_capacity": required_capacity},
             "schedule": schedule,
             "food": {**food, **meal, "selected": food_id, "headcount": headcount,
-                     "quantity": quantity, "cost": food_cost},
+                     "quantity": quantity, "cost": food_cost, "event_attendance": total_people,
+                     "headcount_basis": "explicit" if "headcount" in food else "event_attendance"},
             "judging": {**judging, "cost": judge_cost},
             "budget": {**budget, "total": total, "remaining": amount(cap) - total,
                        "lines": {"venue": amount(room["cost"]), "food": food_cost,

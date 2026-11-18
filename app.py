@@ -9,6 +9,15 @@ ROOT = Path(".constraintos")
 st.set_page_config(page_title="ConstraintOS", layout="wide")
 st.title("ConstraintOS")
 
+def clock(minutes, relative):
+    hours, minutes = divmod(minutes, 60)
+    return f"+{hours:02}:{minutes:02}" if relative else f"{hours:02}:{minutes:02}"
+
+
+def table(rows):
+    st.dataframe(rows, hide_index=True)
+
+
 uploaded = st.file_uploader("Event messages", type=["txt"])
 if st.button("Process messages", disabled=uploaded is None, type="primary"):
     try:
@@ -32,9 +41,38 @@ with plan_tab:
         summary[1].metric("Event duration", f"{plan['schedule']['event_minutes']} min")
         summary[2].metric("Meals", plan["food"]["quantity"])
         summary[3].metric("Judges", plan["judging"]["judges"])
-        for area in ("venue", "schedule", "food", "judging", "budget"):
-            with st.expander(area.capitalize(), expanded=area == "budget"):
-                st.json(plan[area])
+        venue, schedule, food, judging, budget = (plan[area] for area in (
+            "venue", "schedule", "food", "judging", "budget"
+        ))
+        currency = budget.get("currency", "")
+        with st.expander("Schedule", expanded=True):
+            table([
+                {"Activity": block["activity"], "Start": clock(block["start"], schedule["relative_times"]),
+                 "End": clock(block["end"], schedule["relative_times"]),
+                 "Minutes": block["end"] - block["start"]}
+                for block in schedule["timeline"]
+            ])
+        with st.expander("Venue"):
+            st.write(f"{venue['capacity']} seats · {venue['required_capacity']} required")
+            features = venue.get("features")
+            if features:
+                st.write(", ".join(features) if isinstance(features, list) else features)
+        with st.expander("Food"):
+            st.write(food.get("name", food["selected"]))
+            st.write(f"{food['quantity']} meals · {food['headcount']} people to feed")
+        with st.expander("Judging"):
+            st.write(f"{judging['teams']} teams · {judging['waves']} rounds · "
+                     f"{judging['minutes_per_team']} min per team")
+            table([{"Judge": row["judge"], "Teams": ", ".join(map(str, row["teams"]))}
+                   for row in judging.get("assignments", [])])
+        with st.expander("Budget", expanded=True):
+            columns = st.columns(3)
+            for column, key, label in zip(columns, ("cap", "total", "remaining"),
+                                          ("Budget cap", "Planned spend", "Remaining")):
+                column.metric(label, f"{budget[key]} {currency}".strip())
+            table([{"Expense": key.capitalize(), "Amount": str(value)} for key, value in budget["lines"].items()])
+        with st.expander("Source evidence"):
+            st.json(plan_document(state))
         st.download_button("Download plan", encode(plan_document(state)), "plan.json", "application/json")
 with trace_tab:
     token_totals = totals(trace)

@@ -1,9 +1,12 @@
 import unittest
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from constraintos.engine import merge
+from constraintos.engine import apply_message, merge
 from constraintos.planner import build
 from constraintos.schema import Fact, Message
+from constraintos.state import load, save
 
 
 def rows(**values):
@@ -83,3 +86,27 @@ class PlannerTests(unittest.TestCase):
         areas, _, _ = merge(quote(2.50, "", "correction"), facts, rules)
         self.assertEqual(areas, {"food"})
         self.assertIn("supersedes", facts["food.options.plates.unit_cost"])
+
+    def test_bad_update_preserves_plan_and_recorded_rejection_survives_reload(self):
+        facts = base()
+        plan, errors = build(facts, [])
+        self.assertFalse(errors, errors)
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            state = load(root)
+            state.update(facts=facts, plan=plan)
+            evidence = "Kitchen: Order updated to 22 lunches."
+            apply_message(state, Message(
+                evidence=evidence, source="Kitchen", date="", disposition="relevant",
+                reason="", facts=[Fact(area="food", key="food.quantity", value=22,
+                                       kind="instruction", authority="owner",
+                                       operator="none", evidence=evidence)],
+            ), False, float("inf"), state["trace"].append)
+            self.assertIs(state["plan"], plan)
+            self.assertNotIn("food.quantity", state["facts"])
+            save(root, state)
+            reloaded = load(root)
+            self.assertEqual(reloaded["plan"]["food"]["quantity"], 37)
+            self.assertIn("does not cover 37", reloaded["rejected"][0]["reason"])
+            self.assertTrue((root / "plan.json").is_file())
+            self.assertTrue((root / "trace.json").is_file())

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -31,12 +32,17 @@ budget.cap, budget.currency, budget.commitments.<slug>
 Use absolute minutes from midnight for clock times, minutes for durations, numeric
 amounts in the stated budget currency and feature names as lowercase stable slugs.
 Bundle no fields together. Use stable slugs for the same entity across messages.
+When a source identifies an existing fact using different wording, reuse its key
+and canonical source name from context. Keep competing vendors' options distinct.
 For a requirement emit kind rule, area owning the value, and key pointing to the
 plan field it tests (e.g. venue.features contains a feature slug). Generic plan
 fields include venue.capacity/cost/features, food.quantity/features/cost,
 schedule.event_minutes/activities.<slug>.minutes, judging.team_capacity and
 budget.total/remaining. Use other semantic paths for novel attributes and capture
 their grounded facts on options or plan sections. Use eq/ge/le/contains/excludes.
+For a comparison against another plan field use a string operand starting with $
+followed by the field path. For example, "briefing ends before lunch starts" becomes
+a le rule on schedule.activities.briefing.end with operand $schedule.activities.lunch.start.
 For a hard rule that cannot fit these operators use operator none and preserve its
 meaning verbatim in value, with a stable rule key. Use operator none on ordinary facts.
 Store a correction at its target fact key, not under a new key. Vendor quotes are
@@ -66,7 +72,9 @@ def call(messages: list[dict], schema: dict, name: str, number: int, timeout: fl
     if not key:
         raise RuntimeError("GROQ_API_KEY is missing. Use a confirmed free-plan Groq account.")
 
-    from groq import APIStatusError, Groq
+    if timeout <= 0:
+        raise RuntimeError("The model-call time allowance has expired.")
+    from groq import APIStatusError, AsyncGroq
 
     request = {
         "model": MODEL,
@@ -91,15 +99,20 @@ def call(messages: list[dict], schema: dict, name: str, number: int, timeout: fl
         "usage": None,
         "rate_limits": {},
     }
+    async def request_completion():
+        async with asyncio.timeout(timeout):
+            async with AsyncGroq(api_key=key, timeout=timeout, max_retries=0) as client:
+                return await client.chat.completions.with_raw_response.create(**request)
+
     try:
-        with Groq(api_key=key, timeout=timeout, max_retries=0) as client:
-            raw = client.chat.completions.with_raw_response.create(**request)
-            event["rate_limits"] = rate_headers(raw.headers)
-            reply = raw.parse()
-            event["model"] = reply.model
-            event["output"] = raw.http_response.json()
-            event["usage"] = reply.usage.model_dump(mode="json") if reply.usage else None
-            content = reply.choices[0].message.content
+        raw = asyncio.run(request_completion())
+        event["rate_limits"] = rate_headers(raw.headers)
+        event["output"] = raw.http_response.json()
+        event["model"] = event["output"].get("model", MODEL)
+        event["usage"] = event["output"].get("usage")
+        choice = event["output"]["choices"][0]
+        event["finish_reason"] = choice["finish_reason"]
+        content = choice["message"]["content"]
     except APIStatusError as exc:
         event["status"] = exc.status_code
         event["rate_limits"] = rate_headers(exc.response.headers)

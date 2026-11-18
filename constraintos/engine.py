@@ -45,6 +45,20 @@ def reject(state, emit, message, source, reason):
     emit({"type": "rejection", **entry})
 
 
+def accepted(plan, source=None):
+    return {
+        "type": "validation", "status": "accepted", "source": source,
+        "validated_areas": list(AREAS),
+        "checks": {
+            "venue": {"seats": plan["venue"]["capacity"], "required": plan["venue"]["required_capacity"]},
+            "schedule": {"event_minutes": plan["schedule"]["event_minutes"]},
+            "food": {"quantity": plan["food"]["quantity"], "required": plan["food"]["headcount"]},
+            "judging": {"team_capacity": plan["judging"]["team_capacity"], "teams": plan["judging"]["teams"]},
+            "budget": {"total": plan["budget"]["total"], "cap": plan["budget"]["cap"]},
+        },
+    }
+
+
 def merge(message, facts, rules):
     notes = []
     proposals = []
@@ -99,6 +113,41 @@ def merge(message, facts, rules):
     return changed, proposals, notes
 
 
+def apply_message(state, message, initializing, deadline, emit):
+    message_id = digest(message.evidence)
+    if message_id in state["messages"]:
+        emit({"type": "validation", "status": "duplicate", "message_id": message_id})
+        return
+    state["messages"].append(message_id)
+    if message.disposition == "invalid":
+        reject(state, emit, message.evidence, message.source, message.reason or "Invalid instructions.")
+        return
+    if message.disposition == "irrelevant":
+        emit({"type": "validation", "status": "ignored", "source": message.source,
+              "message": message.evidence, "reason": message.reason})
+        return
+
+    facts, rules = state["facts"].copy(), state["rules"].copy()
+    try:
+        changed, proposals, notes = merge(message, facts, rules)
+        impacted = set().union(changed, *(DEPENDENCIES[area] for area in changed))
+        emit({"type": "validation", "status": "analyzed", "source": message.source,
+              "changed_areas": sorted(changed), "affected_areas": sorted(impacted), "decisions": notes})
+        if not changed and not proposals and any(note.startswith("Insufficient") for note in notes):
+            raise ValueError(" ".join(notes))
+        if not initializing and changed:
+            candidate, errors = build(facts, list(rules.values()), deadline)
+            if errors:
+                raise ValueError(" ".join(errors))
+            state["plan"] = candidate
+            emit(accepted(candidate, message.source))
+    except ValueError as exc:
+        reject(state, emit, message.evidence, message.source, str(exc))
+        return
+    state["facts"], state["rules"] = facts, rules
+    state["proposals"].extend(proposals)
+
+
 def run(raw, root=Path(".constraintos"), output=print):
     started = time.monotonic()
     if not raw.strip():
@@ -118,7 +167,8 @@ def run(raw, root=Path(".constraintos"), output=print):
         raw_id = digest(raw)
         if raw_id in state["runs"]:
             emit({"type": "validation", "status": "duplicate", "reason": "This exact input was already processed."})
-            return finish(root, state, current, output, started, "duplicate")
+            status = "duplicate" if state["plan"] is not None else "incomplete"
+            return finish(root, state, current, output, started, status)
 
         initializing = state["plan"] is None
         deadline = started + (114 if initializing else 55)
@@ -130,7 +180,11 @@ def run(raw, root=Path(".constraintos"), output=print):
         number = 1 + sum(item["type"] == "model_call" for item in state["trace"])
         event, content = provider.extract(raw, context, number, timeout)
         emit(event)
-        if not content or not event["usage"] or event["output"]["choices"][0]["finish_reason"] != "stop":
+        counts = ("prompt_tokens", "completion_tokens", "total_tokens")
+        usage = event["usage"] or {}
+        if (not isinstance(content, str) or not content or event.get("finish_reason") != "stop"
+                or event["model"] != provider.MODEL
+                or any(type(usage.get(field)) is not int for field in counts)):
             emit({"type": "validation", "status": "provider_error",
                   "reason": "No complete structured response with reported token usage."})
             return finish(root, state, current, output, started, "provider_error")
@@ -150,39 +204,7 @@ def run(raw, root=Path(".constraintos"), output=print):
             return finish(root, state, current, output, started, "extraction_error")
 
         for message in messages:
-            message_id = digest(message.evidence)
-            if message_id in state["messages"]:
-                emit({"type": "validation", "status": "duplicate", "message_id": message_id})
-                continue
-            state["messages"].append(message_id)
-            if message.disposition == "invalid":
-                reject(state, emit, message.evidence, message.source, message.reason or "Invalid instructions.")
-                continue
-            if message.disposition == "irrelevant":
-                emit({"type": "validation", "status": "ignored", "source": message.source,
-                      "message": message.evidence, "reason": message.reason})
-                continue
-
-            facts, rules = state["facts"].copy(), state["rules"].copy()
-            try:
-                changed, proposals, notes = merge(message, facts, rules)
-                impacted = set().union(changed, *(DEPENDENCIES[area] for area in changed))
-                emit({"type": "validation", "status": "analyzed", "source": message.source,
-                      "changed_areas": sorted(changed), "affected_areas": sorted(impacted), "decisions": notes})
-                if not changed and not proposals and any(note.startswith("Insufficient") for note in notes):
-                    raise ValueError(" ".join(notes))
-                if not initializing and changed:
-                    candidate, errors = build(facts, list(rules.values()), deadline)
-                    if errors:
-                        raise ValueError(" ".join(errors))
-                    state["plan"] = candidate
-                    emit({"type": "validation", "status": "accepted", "source": message.source,
-                          "validated_areas": list(AREAS)})
-            except ValueError as exc:
-                reject(state, emit, message.evidence, message.source, str(exc))
-                continue
-            state["facts"], state["rules"] = facts, rules
-            state["proposals"].extend(proposals)
+            apply_message(state, message, initializing, deadline, emit)
 
         if initializing:
             try:
@@ -193,7 +215,7 @@ def run(raw, root=Path(".constraintos"), output=print):
                 emit({"type": "validation", "status": "incomplete", "reasons": errors})
             else:
                 state["plan"] = candidate
-                emit({"type": "validation", "status": "accepted", "validated_areas": list(AREAS)})
+                emit(accepted(candidate))
         state["runs"].append(raw_id)
         status = "complete" if state["plan"] is not None else "incomplete"
         return finish(root, state, current, output, started, status)

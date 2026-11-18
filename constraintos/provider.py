@@ -42,12 +42,15 @@ schedule.activities.<slug>.minutes = duration of each named activity or break
 budget.cap = approved total event spending ceiling
 budget.commitments.<slug> = money already spent or committed
 
-venue.options.<slug>.name|capacity|cost|features
+venue.options.<slug>.name|capacity|cost|features|available
 venue.required_capacity, venue.selected
 schedule.event_minutes, schedule.start, schedule.end
 schedule.activities.<slug>.name|minutes|start|end|order
 food.headcount, food.quantity, food.selected
-food.options.<slug>.name|unit_cost|fixed_cost|features
+food.options.<slug>.name|unit_cost|fixed_cost|surcharge_percent|features
+food.surcharge_percent is a catering percentage that applies to all choices in
+that caterer's quote. Record 10 for a stated 10% fee. Use the option-specific
+surcharge_percent for an individual meal. Quote the percentage and its fee wording.
 judging.judges, judging.minutes_per_team, judging.max_teams_per_judge,
 judging.honorarium, judging.minimum_judges
 budget.cap, budget.currency, budget.commitments.<slug>
@@ -70,7 +73,8 @@ Classify actions a sender claims to have already taken as facts, corrections or
 instructions. Reserve proposals for requests for approval and tentative ideas.
 Put unapproved proposals in kind "proposal". Use area "proposal" and key
 "proposal" if there is no applicable planning area. Approved costs alone belong
-in budget commitments.
+in budget commitments. Quotes, suggested purchases and requests for approval
+stay proposals unless their source explicitly confirms the commitment.
 For a requirement emit kind rule, area owning the value, and key pointing to the
 plan field it tests. Use venue.features or food.features with contains or excludes
 and a single feature slug. Generic plan fields include venue.capacity/cost/features,
@@ -78,6 +82,11 @@ food.quantity/features/cost,
 schedule.event_minutes/activities.<slug>.minutes, judging.team_capacity and
 budget.total/remaining. Use other semantic paths for novel attributes and capture
 their grounded facts on options or plan sections. Use eq/ge/le/contains/excludes.
+Use step_free for wheelchair-access requirements. For each offered venue, copy
+stated ground_floor and ramp_access into its features when both are reported;
+retain the original supporting phrase with the feature fact. General attendee
+capacity is derived from headcount; emit venue.required_capacity only when a source
+states a numeric minimum. Every real hard rule needs a non-null operand.
 For a comparison against another plan field use a string operand starting with $
 followed by the field path. For example, "briefing ends before lunch starts" becomes
 a le rule on schedule.activities.briefing.end with operand $schedule.activities.lunch.start.

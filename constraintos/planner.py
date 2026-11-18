@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 from itertools import product
 from operator import eq, ge, le
@@ -38,10 +39,36 @@ def money(value):
     return type(value) in (int, float, Decimal) and Decimal(str(value)).is_finite() and value >= 0
 
 
+def feature_slug(value):
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+
+
+def venue_features(room, evidence):
+    features = room.get("features") or []
+    features = [features] if isinstance(features, str) else features
+    slugs = {feature_slug(value) for value in features}
+    if room.get("step_free") is False:
+        return sorted(slugs - {"step_free", "step_free_access", "wheelchair_accessible", "wheelchair_access"})
+    if room.get("step_free") is True or slugs & {"step_free", "step_free_access", "wheelchair_accessible", "wheelchair_access"}:
+        return sorted(slugs | {"step_free"})
+    ground = room.get("ground_floor") is True or bool(slugs & {"ground_floor", "on_ground_floor"})
+    ramp = room.get("ramp_access") is True or bool(slugs & {"ramp", "ramp_access", "accessible_ramp"})
+    grounded_access = re.search(
+        r"\bground[ -]floor\s+(?:with|and)\s+(?:a\s+)?(?:accessible\s+)?ramp\b", evidence, re.I,
+    )
+    denied = re.search(r"\b(?:no\s+(?:wheelchair|ramp)|not\s+(?:on\s+(?:the\s+)?ground[ -]floor|step[ -]free|wheelchair[ -]accessible))\b",
+                       evidence, re.I)
+    if (ground and ramp or grounded_access) and not denied:
+        slugs.add("step_free")
+    return sorted(slugs)
+
+
 def requirements(plan, rules):
     errors = []
     for rule in rules:
         key, operator, expected = (rule[k] for k in ("key", "operator", "value"))
+        if key == "venue.required_capacity" and operator == "none" and expected is None:
+            continue
         actual = get(plan, key)
         if operator != "none" and isinstance(expected, str) and expected.startswith("$"):
             reference = expected[1:]
@@ -56,6 +83,10 @@ def requirements(plan, rules):
                 passed = actual is not None and {"eq": eq, "ge": ge, "le": le}[operator](actual, expected)
             elif operator in ("contains", "excludes"):
                 values = expected if isinstance(expected, list) else [expected]
+                if key == "venue.features":
+                    values = [feature_slug(value) if isinstance(value, str) else value for value in values]
+                    values = ["step_free" if value in {"step_free_access", "wheelchair_accessible",
+                                                      "wheelchair_access"} else value for value in values]
                 passed = isinstance(actual, (list, str)) and (
                     all(value in actual for value in values) if operator == "contains"
                     else all(value not in actual for value in values)
@@ -272,6 +303,7 @@ def build(facts, rules, deadline=float("inf")):
               and venue.get("selected", key) == key]
     meals = [(key, item) for key, item in food.get("options", {}).items()
              if money(item.get("unit_cost")) and money(item.get("fixed_cost", 0))
+             and money(item.get("surcharge_percent", 0))
              and item.get("available", True) is not False and food.get("selected", key) == key]
     if not venues or not meals:
         return data, [*(["No priced venue meets attendance and selection requirements."] if not venues else []),
@@ -279,16 +311,31 @@ def build(facts, rules, deadline=float("inf")):
 
     best = None
     closest = None
+    shared_fee = facts.get("food.surcharge_percent", {})
+    if shared_fee and not money(shared_fee["value"]):
+        return data, ["The catering surcharge must be a nonnegative percentage."]
     for (venue_id, room), (food_id, meal) in product(sorted(venues), sorted(meals)):
         if monotonic() >= deadline:
             raise ValueError("Venue and meal search reached its time limit.")
-        food_cost = quantity * amount(meal["unit_cost"]) + amount(meal.get("fixed_cost", 0))
+        fee_percent = meal.get("surcharge_percent")
+        if fee_percent is None:
+            quote_source = facts[f"food.options.{food_id}.unit_cost"].get("source")
+            applies = shared_fee and shared_fee.get("source") == quote_source
+            fee_percent = shared_fee["value"] if applies else 0
+        food_subtotal = quantity * amount(meal["unit_cost"]) + amount(meal.get("fixed_cost", 0))
+        surcharge = food_subtotal * amount(fee_percent) / 100
+        food_cost = food_subtotal + surcharge
+        venue_prefix = f"venue.options.{venue_id}."
+        access_evidence = " ".join(item.get("evidence", "") for key, item in facts.items()
+                                   if key.startswith(venue_prefix))
         total = amount(room["cost"]) + food_cost + judge_cost + committed
         candidate = {
-            "venue": {**venue, **room, "selected": venue_id, "required_capacity": required_capacity},
+            "venue": {**venue, **room, "selected": venue_id, "required_capacity": required_capacity,
+                      "features": venue_features(room, access_evidence)},
             "schedule": schedule,
             "food": {**food, **meal, "selected": food_id, "headcount": headcount,
                      "quantity": quantity, "cost": food_cost, "event_attendance": total_people,
+                     "subtotal": food_subtotal, "surcharge_percent": fee_percent, "surcharge": surcharge,
                      "headcount_basis": "explicit" if "headcount" in food else "event_attendance"},
             "judging": {**judging, "cost": judge_cost},
             "budget": {**budget, "total": total, "remaining": amount(cap) - total,

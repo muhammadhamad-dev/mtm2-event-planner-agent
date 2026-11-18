@@ -20,6 +20,55 @@ def change(source, date, key, value, evidence, kind="correction", authority="own
 
 
 class ChangeTests(unittest.TestCase):
+    def test_ground_floor_ramp_satisfies_accessibility_but_ramp_alone_does_not(self):
+        facts, rules = base(), {}
+        facts.pop("venue.options.annex.features")
+        message = change("Facilities", "", "venue.options.annex.features", "ground_floor",
+                         "The annex is on the ground floor with a ramp.", kind="fact")
+        message.facts[0].evidence = "ground floor"
+        message.facts[0].operator = "contains"
+        message.facts.append(message.facts[0].model_copy(update={"value": "ramp_access", "evidence": "a ramp"}))
+        merge(message, facts, rules)
+        self.assertEqual(facts["venue.options.annex.features"]["feature_evidence"], ["ground floor", "a ramp"])
+        access = change("Organizer", "", "venue.required_capacity", None,
+                        "The selected space must be wheelchair-accessible.", kind="rule")
+        merge(access, facts, rules)
+        facts["venue.options.studio.features"] = {"key": "venue.options.studio.features", "value": ["ramp_access"]}
+        plan, errors = build(facts, list(rules.values()))
+        self.assertFalse(errors, errors)
+        self.assertEqual(plan["venue"]["selected"], "annex")
+        self.assertIn("step_free", plan["venue"]["features"])
+        placeholder = change("Organizer", "", "venue.required_capacity", None,
+                             "Use the confirmed attendance for capacity.", kind="rule")
+        _, _, notes, _ = merge(placeholder, facts, rules)
+        self.assertIn("empty venue capacity placeholder", notes[0])
+
+    def test_service_percentage_added_to_food_and_budget(self):
+        facts, rules = base(), {}
+        facts["food.options.plates.unit_cost"]["source"] = "Kitchen"
+        fee = change("Kitchen", "", "food.service_charge_percent", 0.125,
+                     "A 12.5% service charge applies to the total.", kind="fact")
+        merge(fee, facts, rules)
+        plan, errors = build(facts, list(rules.values()))
+        self.assertFalse(errors, errors)
+        self.assertEqual(plan["food"]["surcharge"], Decimal("10.40625"))
+        self.assertEqual(plan["food"]["cost"], Decimal("93.65625"))
+        self.assertEqual(plan["budget"]["total"], Decimal("153.15625"))
+
+    def test_unapproved_quote_is_proposal_even_if_extracted_as_commitment(self):
+        facts, rules = base(), {}
+        quote = change("Organizer", "", "budget.commitments.sound", 40,
+                       "Could we hire a sound system? Quoted at Rs 40.", kind="fact")
+        quote.facts[0].evidence = "Quoted at Rs 40"
+        changed, proposals, _, _ = merge(quote, facts, rules)
+        self.assertFalse(changed)
+        self.assertEqual(proposals[0]["kind"], "proposal")
+        self.assertNotIn("budget.commitments.sound", facts)
+        confirmed = change("Organizer", "", "budget.commitments.sound", 40,
+                           "We approved and ordered the sound system for Rs 40.", kind="fact")
+        merge(confirmed, facts, rules)
+        self.assertEqual(facts["budget.commitments.sound"]["value"], 40)
+
     def test_grounded_charge_list_and_feature_rule_alias(self):
         facts, rules = base(), {}
         message = change("Finance", "", "budget.commitments.badges", 6,

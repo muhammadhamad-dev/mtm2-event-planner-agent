@@ -183,6 +183,22 @@ def accepted(plan, source=None):
     }
 
 
+def commitment_supported(text, start, end, prior, kind):
+    prefix = re.split(r"(?<=[.!?])\s+", text[:start])[-1]
+    suffix = re.split(r"(?<=[.!?])\s+", text[end:], maxsplit=1)[0]
+    clause = prefix + text[start:end] + suffix
+    if re.search(r"\b(?:not yet|not|never|pending|awaiting|if)\s+(?:been\s+)?(?:approved|approval|paid|committed|ordered)\b",
+                 clause, re.I):
+        return False
+    if re.search(r"\b(?:can|could|should|may) we\b|\b(?:propose|suggest|tentative)\b", clause, re.I):
+        return False
+    if re.search(r"\b(?:paid|prepaid|committed|ordered|booked|purchased|bought|approved|locked in|ada kar)\b",
+                 clause, re.I):
+        return True
+    return bool(prior and (kind == "correction" or cites_replaced_amount(clause, prior["value"]))
+                and not re.search(r"\b(?:quote|estimate|proposal|optional)\b", clause, re.I))
+
+
 def merge(message, facts, rules):
     notes = []
     proposals = []
@@ -217,13 +233,35 @@ def merge(message, facts, rules):
             start, end = fact_span(message.evidence, fact.evidence, key)
         except ValueError:
             raise ValueError(f"Evidence for {key} does not occur in the source message.")
+        source_quote = message.evidence[start:end]
+        if key == "venue.required_capacity" and fact.kind == "rule" and value is None:
+            if re.search(r"\b(?:must|required|needs?)\b", source_quote, re.I) and re.search(
+                r"\b(?:step[ -]free|wheelchair[ -]accessible|wheelchair access)\b", source_quote, re.I
+            ):
+                key, value = "venue.features", "step_free"
+                fact = fact.model_copy(update={"operator": "contains"})
+            else:
+                notes.append("Ignored empty venue capacity placeholder; attendance sets the minimum.")
+                continue
+        elif fact.kind == "rule" and value is None:
+            value = source_quote
+            fact = fact.model_copy(update={"operator": "none"})
+        fee = re.fullmatch(r"(food(?:\.options\.[^.]+)?)\.(?:surcharge|service_charge|service_fee)(?:_percent)?", key)
+        if fee:
+            rate = re.search(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b|per cent\b)", source_quote, re.I)
+            if rate:
+                key = f"{fee[1]}.surcharge_percent"
+                value = float(rate[1])
+                fact = fact.model_copy(update={"kind": "fact", "operator": "none"})
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"Invalid numeric value for {key}.")
-        row = {**fact.model_dump(), "key": key, "area": area, "evidence": message.evidence[start:end],
+        row = {**fact.model_dump(), "key": key, "area": area, "value": value, "evidence": source_quote,
                "source": message.source, "date": message.date,
                "message_id": digest(message.evidence)}
-        if fact.kind == "proposal":
-            proposals.append({**row, "area": "proposal", "key": "proposal"})
+        if fact.kind == "proposal" or (key.startswith("budget.commitments.") and not commitment_supported(
+            message.evidence, start, end, facts.get(key), fact.kind
+        )):
+            proposals.append({**row, "area": "proposal", "key": "proposal", "kind": "proposal"})
             notes.append("Recorded unapproved proposal.")
             continue
         if fact.authority != "owner" or not message.source.strip():
@@ -243,6 +281,18 @@ def merge(message, facts, rules):
             identity, target = key, facts
         prior = target.get(identity)
         if prior:
+            if (fact.kind == "fact" and key.endswith(".features") and fact.operator == "contains"
+                    and prior["source"] == message.source and prior["message_id"] == row["message_id"]):
+                previous = prior["value"] if isinstance(prior["value"], list) else [prior["value"]]
+                incoming = value if isinstance(value, list) else [value]
+                if all(isinstance(feature, str) for feature in previous + incoming):
+                    row["value"] = list(dict.fromkeys(previous + incoming))
+                    row["feature_evidence"] = list(dict.fromkeys(
+                        prior.get("feature_evidence", [prior["evidence"]]) + [source_quote]
+                    ))
+                    target[identity] = row
+                    changed.add(area)
+                    continue
             if older(message.date, prior["date"]):
                 notes.append(f"Ignored stale value for {key} from {message.source}.")
                 continue

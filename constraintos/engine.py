@@ -2,6 +2,7 @@ import hashlib
 import math
 import re
 import time
+from calendar import month_name
 from datetime import date
 from pathlib import Path
 
@@ -18,6 +19,21 @@ DEPENDENCIES = {
     "judging": {"schedule", "venue", "food", "budget"}, "budget": set(),
 }
 KEY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_][a-z0-9_-]*)+\Z")
+MONTHS = {name.lower(): number for number, name in enumerate(month_name) if name}
+MONTHS.update({name[:3]: number for name, number in tuple(MONTHS.items())})
+MONTH = "|".join(sorted(MONTHS, key=len, reverse=True))
+SOURCE_DATES = (
+    re.compile(rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?[\s-]+(?P<month>{MONTH})\b\.?(?:[\s,-]+(?P<year>\d{{4}})\b)?", re.I),
+    re.compile(rf"\b(?P<month>{MONTH})\.?[\s-]+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\b(?:[\s,-]+(?P<year>\d{{4}})\b)?", re.I),
+    re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b"),
+    re.compile(r"(?<![\d/-])(?P<day>\d{1,2})[/-](?P<month>\d{1,2})(?:[/-](?P<year>\d{4}))?(?![\d/-])"),
+)
+AVAILABILITY = re.compile(
+    r"\b(?:late|later|delay(?:ed)?|early|arriv\w*|availability|make it|attend\w*|der se|pohnch\w*|pahunch\w*)\b", re.I
+)
+PERSONAL = re.compile(r"\b(?:i|my|main|mein|meri|mera)\b", re.I)
+TENTATIVE = re.compile(r"\b(?:may|might|could|possibly|probably|tentative|shayad|mumkin)\b", re.I)
+ARRIVAL_TIMING = re.compile(r"\b(?:late|later|delay(?:ed)?|early|arriv\w*|der se|pohnch\w*|pahunch\w*)\b", re.I)
 
 
 def digest(raw):
@@ -43,13 +59,65 @@ def timestamp(value):
     return date.fromisoformat("2000-" + value[2:] if value.startswith("--") else value)
 
 
+def grounded_date(proposed, metadata):
+    dates = set()
+    for pattern in SOURCE_DATES:
+        for match in pattern.finditer(metadata):
+            month = match["month"].lower()
+            number = int(month) if month.isdigit() else MONTHS[month]
+            value = f"{match['year'] or '-'}-{number:02}-{int(match['day']):02}"
+            try:
+                timestamp(value)
+            except ValueError:
+                continue
+            dates.add(value)
+    if len(dates) == 1:
+        return dates.pop()
+    if re.fullmatch(r"(?:\d{4}|-)-\d{2}-\d{2}", proposed):
+        matches = {value for value in dates if value[-5:] == proposed[-5:]}
+        if len(matches) == 1:
+            return matches.pop()
+    return ""
+
+
 def older(incoming, previous):
     first, second = timestamp(incoming), timestamp(previous)
     if first is None or second is None:
         return False
-    if incoming.startswith("--") or previous.startswith("--"):
+    if incoming.startswith("--") != previous.startswith("--"):
+        return False
+    if incoming.startswith("--"):
         return (first.month, first.day) < (second.month, second.day)
     return first < second
+
+
+def availability_notices(text):
+    return [
+        part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", text)
+        if AVAILABILITY.search(part)
+        and (TENTATIVE.search(part) or (PERSONAL.search(part) and ARRIVAL_TIMING.search(part)))
+    ]
+
+
+def grounded_messages(raw, content):
+    messages = Extraction.model_validate_json(content).messages
+    if not messages:
+        raise ValueError("No source messages were extracted.")
+    cursor = 0
+    for message in messages:
+        if not message.evidence.strip():
+            raise ValueError("Extracted message has no evidence.")
+        start, end = quote_span(raw, message.evidence, cursor)
+        metadata = raw[cursor:start]
+        first_line, newline, _ = raw[start:end].partition("\n")
+        if re.match(r"\s*(?:date|sent|posted)\s*:", first_line, re.I) or (
+            newline and message.source and message.source.casefold() in first_line.casefold()
+        ):
+            metadata += "\n" + first_line
+        message.date = grounded_date(message.date, metadata)
+        message.evidence = raw[start:end]
+        cursor = end
+    return messages
 
 
 def cites_replaced_amount(evidence, old_value):
@@ -102,6 +170,7 @@ def accepted(plan, source=None):
 def merge(message, facts, rules):
     notes = []
     proposals = []
+    advisories = []
     changed = set()
     timestamp(message.date)
     for fact in message.facts:
@@ -116,6 +185,14 @@ def merge(message, facts, rules):
         if key == "budget.commitments.honorarium" and re.search(r"\b(?:each|per judge)\b", fact.evidence, re.I):
             key = "judging.honorarium"
         area = key.split(".", 1)[0]
+        if area == "judging" and (
+            key == "judging.judges" or re.search(r"lateness|availability|arrival", key)
+        ):
+            notice = next((part for part in availability_notices(message.evidence)
+                           if len(message.facts) == 1 or fact.evidence.rstrip(".,;!?") in part), None)
+            if notice:
+                advisories.append(notice)
+                continue
         try:
             if not fact.evidence.strip():
                 raise ValueError("Empty quote.")
@@ -134,8 +211,8 @@ def merge(message, facts, rules):
                "source": message.source, "date": message.date,
                "message_id": digest(message.evidence)}
         if fact.kind == "proposal":
-            proposals.append(row)
-            notes.append(f"Recorded unapproved proposal for {key}.")
+            proposals.append({**row, "area": "proposal", "key": "proposal"})
+            notes.append("Recorded unapproved proposal.")
             continue
         if fact.authority != "owner" or not message.source.strip():
             notes.append(f"Insufficient source authority for {key}.")
@@ -165,7 +242,7 @@ def merge(message, facts, rules):
             if prior["source"].casefold() != message.source.casefold() and fact.kind != "correction":
                 raise ValueError(f"Conflicting claims for {key} from {prior['source']} and {message.source}.")
             if message.date and prior["date"] and not older(prior["date"], message.date) and fact.kind != "correction":
-                raise ValueError(f"Conflicting claims for {key} on the same date.")
+                raise ValueError(f"Dates do not establish a newer claim for {key}.")
             explicit_replacement = (
                 prior["source"].casefold() == message.source.casefold()
                 and cites_replaced_amount(message.evidence, prior["value"])
@@ -177,7 +254,7 @@ def merge(message, facts, rules):
             notes.append(f"Superseded {key} from {prior['source']} ({prior['date'] or 'undated'}).")
         target[identity] = row
         changed.add(area)
-    return changed, proposals, notes
+    return changed, proposals, notes, list(dict.fromkeys(advisories))
 
 
 def apply_message(state, message, initializing, deadline, emit):
@@ -190,17 +267,22 @@ def apply_message(state, message, initializing, deadline, emit):
         reject(state, emit, message.evidence, message.source, message.reason or "Invalid instructions.")
         return
     if message.disposition == "irrelevant":
-        emit({"type": "validation", "status": "ignored", "source": message.source,
+        notice = availability_notices(message.evidence)
+        emit({"type": "validation", "status": "advisory" if notice else "ignored", "source": message.source,
               "message": message.evidence, "reason": message.reason})
         return
 
     facts, rules = state["facts"].copy(), state["rules"].copy()
     try:
-        changed, proposals, notes = merge(message, facts, rules)
+        changed, proposals, notes, advisories = merge(message, facts, rules)
+        for notice in advisories:
+            emit({"type": "validation", "status": "advisory", "source": message.source,
+                  "message": notice, "date": message.date,
+                  "reason": "Availability notice leaves confirmed attendance unchanged."})
         emit({"type": "validation", "status": "analyzed", "source": message.source,
               "changed_areas": sorted(changed), "affected_areas": dependencies(changed, rules.values()),
               "decisions": notes})
-        if not changed and not proposals and any(note.startswith("Insufficient") for note in notes):
+        if not changed and not proposals and not advisories and any(note.startswith("Insufficient") for note in notes):
             raise ValueError(" ".join(notes))
         if not initializing and changed:
             candidate, errors = build(facts, list(rules.values()), deadline)
@@ -276,20 +358,7 @@ def run(raw, root=Path(".constraintos"), output=print):
             return finish(root, state, current, output, started, "provider_error")
 
         try:
-            messages = Extraction.model_validate_json(content).messages
-            cursor = 0
-            for message in messages:
-                if not message.evidence.strip():
-                    raise ValueError("Extracted message has no evidence.")
-                start, end = quote_span(raw, message.evidence, cursor)
-                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", message.date):
-                    year = message.date[:4]
-                    if not re.search(rf"\b{year}\b", raw[cursor:end]):
-                        message.date = "--" + message.date[5:]
-                message.evidence = raw[start:end]
-                cursor = end
-            if not messages:
-                raise ValueError("No source messages were extracted.")
+            messages = grounded_messages(raw, content)
         except (ValidationError, ValueError):
             emit({"type": "validation", "status": "extraction_error",
                   "reason": "The response did not provide grounded messages in source order."})

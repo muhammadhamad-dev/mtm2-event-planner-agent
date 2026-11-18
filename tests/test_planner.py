@@ -1,9 +1,10 @@
 import unittest
+import json
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from constraintos.engine import apply_message, merge, quote_span
+from constraintos.engine import apply_message, grounded_date, grounded_messages, merge, older, quote_span
 from constraintos.planner import build
 from constraintos.schema import Fact, Message
 from constraintos.state import load, save
@@ -38,6 +39,69 @@ def base():
 
 
 class PlannerTests(unittest.TestCase):
+    def test_dates_require_grounded_day_month_and_year(self):
+        cases = [
+            ("2023-11-09", "Organizer, email\n9 Nov", "--11-09"),
+            ("2024-11-09", "9 November 2026", "2026-11-09"),
+            ("2025-07-14", "14 Jul, project code 2025", "--07-14"),
+            ("", "Sent: 2026-03-04", "2026-03-04"),
+            ("2025-03-04", "4/3/2025", "2025-03-04"),
+            ("2025-03-04", "No timestamp was provided.", ""),
+            ("2025-03-04", "Posted 4 March 2024 or 4 March 2025", ""),
+        ]
+        for guess, source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(grounded_date(guess, source), expected)
+        self.assertTrue(older("--09-12", "--10-13"))
+        self.assertFalse(older("--09-12", "2023-10-13"))
+        self.assertTrue(older("2023-12-30", "2024-01-02"))
+
+    def test_message_grounding_uses_posting_metadata_and_preserves_original_body(self):
+        body = "We can reuse the signs from 6 May 2024."
+        raw = "Finance, 18 Apr\r\n" + body
+        content = json.dumps({"messages": [{
+            "evidence": body, "source": "Finance", "date": "2024-04-18",
+            "disposition": "irrelevant", "reason": "", "facts": [],
+        }]})
+        message, = grounded_messages(raw, content)
+        self.assertEqual(message.date, "--04-18")
+        self.assertEqual(message.evidence, body)
+        self.assertIn("2024-04-18", content)
+
+    def test_tentative_availability_cannot_change_judge_count(self):
+        for notice in ("I might arrive after the first round.", "Main shayad der se pohnchun."):
+            with self.subTest(notice=notice):
+                facts = base()
+                plan, errors = build(facts, [])
+                self.assertFalse(errors)
+                state = {"facts": facts, "plan": plan, "rules": {}, "proposals": [],
+                         "messages": [], "rejected": [], "trace": []}
+                message = Message(
+                    evidence=notice, source="Judge", date="", disposition="relevant", reason="",
+                    facts=[Fact(area="judging", key="judging.judges", value=2, kind="correction",
+                                authority="participant", operator="none", evidence=notice)],
+                )
+                apply_message(state, message, False, float("inf"), state["trace"].append)
+                self.assertIs(state["plan"], plan)
+                self.assertEqual(state["facts"]["judging.judges"]["value"], 3)
+                self.assertFalse(state["rejected"])
+                self.assertEqual(state["trace"][0]["status"], "advisory")
+
+    def test_unapproved_proposal_uses_generic_ledger(self):
+        quote = "Could we hire a photographer for 300?"
+        message = Message(
+            evidence=quote, source="Volunteer", date="", disposition="relevant", reason="",
+            facts=[Fact(area="food", key="food.options.photographer.quote", value=300, kind="proposal",
+                        authority="participant", operator="none", evidence=quote)],
+        )
+        facts = base()
+        before, _ = build(facts, [])
+        changed, proposals, _, _ = merge(message, facts, {})
+        self.assertFalse(changed)
+        self.assertEqual(proposals[0]["area"], "proposal")
+        self.assertEqual(proposals[0]["evidence"], quote)
+        self.assertEqual(build(facts, [])[0]["budget"], before["budget"])
+
     def test_quote_matching_preserves_windows_newlines(self):
         source = "Sender\r\nThe quote is 4.\r\nDelivered."
         left, right = quote_span(source, "The quote is 4.\nDelivered.")
@@ -117,11 +181,11 @@ class PlannerTests(unittest.TestCase):
 
         facts, rules = {}, {}
         merge(quote(2.25, "--07-15", "fact"), facts, rules)
-        areas, _, notes = merge(quote(3, "--07-01", "fact"), facts, rules)
+        areas, _, notes, _ = merge(quote(3, "--07-01", "fact"), facts, rules)
         self.assertFalse(areas)
         self.assertIn("stale", notes[0])
         self.assertEqual(facts["food.options.plates.unit_cost"]["value"], 2.25)
-        areas, _, _ = merge(quote(2.50, "", "correction"), facts, rules)
+        areas, _, _, _ = merge(quote(2.50, "", "correction"), facts, rules)
         self.assertEqual(areas, {"food"})
         self.assertIn("supersedes", facts["food.options.plates.unit_cost"])
 

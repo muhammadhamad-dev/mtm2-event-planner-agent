@@ -6,3 +6,19 @@ address = "127.0.0.1"
 
 [browser]
 gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#0D6C59"
+backgroundColor = "#F8F7F2"
+secondaryBackgroundColor = "#EFEEE6"
+textColor = "#1D2926"
+borderColor = "#D6DAD0"
+showWidgetBorder = true
+baseRadius = "0.4rem"
+paddingTop = "0.9rem"
+paddingBottom = "2rem"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"

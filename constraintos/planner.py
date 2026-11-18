@@ -23,6 +23,13 @@ def get(root, key):
     return root
 
 
+def cross_area_schedule_rule(rule):
+    operand = rule["value"]
+    return (rule["key"].startswith("schedule.") and rule["operator"] != "none"
+            and isinstance(operand, str) and operand.startswith("$")
+            and not operand.startswith("$schedule."))
+
+
 def integer(value):
     return type(value) is int and value >= 0
 
@@ -64,8 +71,27 @@ def requirements(plan, rules):
 def schedule_plan(schedule, rules, judging_minutes, deadline):
     activities = {name: dict(activity) for name, activity in schedule.get("activities", {}).items()}
     total = schedule.get("event_minutes")
-    start = schedule.get("start", 0)
+    start = schedule.get("start")
     end = schedule.get("end")
+    fixed = {
+        rule["key"]: rule["value"] for rule in rules
+        if rule["operator"] == "eq" and integer(rule["value"])
+    }
+    if total is None:
+        total = fixed.get("schedule.event_minutes")
+    if start is None:
+        start = fixed.get("schedule.start")
+    if end is None:
+        end = fixed.get("schedule.end")
+    absolute_time = start is not None or end is not None
+    if start is None:
+        lower_bounds = [rule["value"] for rule in rules if rule["key"] == "schedule.start"
+                        and rule["operator"] == "ge" and integer(rule["value"])]
+        if integer(end) and integer(total):
+            start = end - total
+        else:
+            start = max(lower_bounds, default=0)
+        absolute_time = absolute_time or bool(lower_bounds)
     if total is None and integer(end) and integer(start) and end > start:
         total = end - start
     if not integer(start) or not integer(total) or total == 0:
@@ -152,11 +178,7 @@ def schedule_plan(schedule, rules, judging_minutes, deadline):
                 del scheduled[name]
         return False
 
-    schedule_rules = [
-        rule for rule in rules if rule["key"].startswith("schedule.")
-        and (not isinstance(rule["value"], str) or not rule["value"].startswith("$")
-             or rule["value"].startswith("$schedule."))
-    ]
+    schedule_rules = [rule for rule in rules if rule["key"].startswith("schedule.")]
     if not place(0):
         details = "; ".join(f'{rule["key"]} {rule["operator"]} {rule["value"]}'
                             for rule in schedule_rules)
@@ -171,7 +193,7 @@ def schedule_plan(schedule, rules, judging_minutes, deadline):
     if cursor < end:
         timeline.append({"activity": "Team work / flexible event time", "start": cursor, "end": end})
     return {**schedule, "start": start, "end": end, "event_minutes": total,
-            "activities": scheduled, "timeline": timeline, "relative_times": "start" not in schedule}, []
+            "activities": scheduled, "timeline": timeline, "relative_times": not absolute_time}, []
 
 
 def build(facts, rules, deadline=float("inf")):
@@ -179,6 +201,7 @@ def build(facts, rules, deadline=float("inf")):
     for fact in sorted(facts.values(), key=lambda item: item["key"]):
         put(data, fact["key"], fact["value"])
     venue, schedule, food, judging, budget = data.values()
+    schedule_uses_other_areas = any(map(cross_area_schedule_rule, rules))
     option_groups = (venue.get("options", {}), food.get("options", {}), schedule.get("activities", {}))
     if any(not isinstance(group, dict) or any(not isinstance(item, dict) for item in group.values())
            for group in option_groups):
@@ -209,8 +232,9 @@ def build(facts, rules, deadline=float("inf")):
                 {"judge": judge + 1, "teams": list(range(judge + 1, teams + 1, judges))}
                 for judge in range(min(judges, teams))
             ]
-        schedule, failures = schedule_plan(schedule, rules, judging["duration"], deadline)
-        errors.extend(failures)
+        if not schedule_uses_other_areas:
+            schedule, failures = schedule_plan(schedule, rules, judging["duration"], deadline)
+            errors.extend(failures)
 
     total_people = students + judges + (staff or 0) if (
         integer(students) and integer(judges) and (staff is None or integer(staff))
@@ -269,7 +293,16 @@ def build(facts, rules, deadline=float("inf")):
                        "lines": {"venue": amount(room["cost"]), "food": food_cost,
                                  "judging": judge_cost, "commitments": committed}},
         }
-        failures = requirements(candidate, rules)
+        failures = []
+        if schedule_uses_other_areas:
+            resolved = [
+                {**rule, "value": get(candidate, rule["value"][1:])}
+                if cross_area_schedule_rule(rule) else rule
+                for rule in rules
+            ]
+            candidate["schedule"], failures = schedule_plan(schedule, resolved, judging["duration"], deadline)
+        if not failures:
+            failures = requirements(candidate, rules)
         if total > amount(cap):
             failures.append(f"Total {total} exceeds budget cap {cap}.")
         if not failures and (best is None or total < best[0]):

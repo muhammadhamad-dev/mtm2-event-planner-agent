@@ -6,6 +6,8 @@ ConstraintOS reads event messages with Groq and uses Python to build a venue, sc
 
 Use Python 3.11 or later. Install in a virtual environment with `python -m pip install -e .`. Make `GROQ_API_KEY` available to the Python process from a confirmed free-plan Groq account.
 
+On Windows, a user-level environment variable named `GROQ_API_KEY` also works. Set it in the Windows Environment Variables dialog and keep the value out of the repository and message files.
+
 ```text
 python -m constraintos --check-provider
 python -m constraintos path/to/messages.txt
@@ -22,3 +24,5 @@ State, plan and trace live in the ignored `.constraintos/` directory. Submit `pl
 Every fresh input file sent to the provider uses one call tagged `reading`. Duplicate files already processed from the same state use zero calls. Python records which plan areas the extracted changes affect and checks the resulting candidate for feasibility. Infeasible updates are rejected transactionally.
 
 The provider trace shows request and response data, model, latency, rate-limit headers, and token usage as reported by Groq. Failed calls can lack usage. No fallback runs automatically.
+
+Run the deterministic regression suite with `python -m unittest discover -s tests -v`. The provider check above verifies live access separately.

@@ -15,13 +15,26 @@ from .state import load, save, totals, transaction
 AREAS = ("venue", "schedule", "food", "judging", "budget")
 DEPENDENCIES = {
     "venue": {"budget"}, "schedule": set(), "food": {"budget"},
-    "judging": {"schedule", "venue", "food", "budget"}, "budget": set(AREAS),
+    "judging": {"schedule", "venue", "food", "budget"}, "budget": set(),
 }
 KEY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_][a-z0-9_-]*)+\Z")
 
 
 def digest(raw):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def quote_span(text, quote, start=0):
+    exact = text.find(quote, start)
+    if exact >= 0:
+        return exact, exact + len(quote)
+    # Match newline style differences while saving the original source characters.
+    lines = re.split(r"\r\n|\r|\n", quote)
+    pattern = r"(?:\r\n|\r|\n)".join(map(re.escape, lines))
+    match = re.compile(pattern).search(text, start)
+    if match:
+        return match.span()
+    raise ValueError("Quote does not occur in its source text.")
 
 
 def timestamp(value):
@@ -37,6 +50,23 @@ def older(incoming, previous):
     if incoming.startswith("--") or previous.startswith("--"):
         return (first.month, first.day) < (second.month, second.day)
     return first < second
+
+
+def dependencies(changed, rules):
+    edges = {area: downstream.copy() for area, downstream in DEPENDENCIES.items()}
+    for rule in rules:
+        operand = rule["value"]
+        if isinstance(operand, str) and operand.startswith("$"):
+            source = operand[1:].split(".", 1)[0]
+            if source in edges:
+                edges[source].add(rule["area"])
+    affected = set(changed)
+    pending = list(changed)
+    while pending:
+        new = edges[pending.pop()] - affected
+        affected.update(new)
+        pending.extend(new)
+    return sorted(affected)
 
 
 def reject(state, emit, message, source, reason):
@@ -66,13 +96,18 @@ def merge(message, facts, rules):
     timestamp(message.date)
     for fact in message.facts:
         key, value = fact.key, fact.value
-        if not fact.evidence.strip() or fact.evidence not in message.evidence:
+        try:
+            if not fact.evidence.strip():
+                raise ValueError("Empty quote.")
+            start, end = quote_span(message.evidence, fact.evidence)
+        except ValueError:
             raise ValueError(f"Evidence for {key} does not occur in the source message.")
         if not KEY.fullmatch(key) or not key.startswith(fact.area + "."):
             raise ValueError(f"Invalid or mismatched planning key {key!r}.")
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"Invalid numeric value for {key}.")
-        row = {**fact.model_dump(), "source": message.source, "date": message.date,
+        row = {**fact.model_dump(), "evidence": message.evidence[start:end],
+               "source": message.source, "date": message.date,
                "message_id": digest(message.evidence)}
         if fact.kind == "proposal":
             proposals.append(row)
@@ -130,9 +165,9 @@ def apply_message(state, message, initializing, deadline, emit):
     facts, rules = state["facts"].copy(), state["rules"].copy()
     try:
         changed, proposals, notes = merge(message, facts, rules)
-        impacted = set().union(changed, *(DEPENDENCIES[area] for area in changed))
         emit({"type": "validation", "status": "analyzed", "source": message.source,
-              "changed_areas": sorted(changed), "affected_areas": sorted(impacted), "decisions": notes})
+              "changed_areas": sorted(changed), "affected_areas": dependencies(changed, rules.values()),
+              "decisions": notes})
         if not changed and not proposals and any(note.startswith("Insufficient") for note in notes):
             raise ValueError(" ".join(notes))
         if not initializing and changed:
@@ -195,7 +230,8 @@ def run(raw, root=Path(".constraintos"), output=print):
             for message in messages:
                 if not message.evidence.strip():
                     raise ValueError("Extracted message has no evidence.")
-                cursor = raw.index(message.evidence, cursor) + len(message.evidence)
+                start, cursor = quote_span(raw, message.evidence, cursor)
+                message.evidence = raw[start:cursor]
             if not messages:
                 raise ValueError("No source messages were extracted.")
         except (ValidationError, ValueError):

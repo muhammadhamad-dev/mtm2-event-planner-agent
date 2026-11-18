@@ -34,6 +34,11 @@ amounts in the stated budget currency and feature names as lowercase stable slug
 Bundle no fields together. Use stable slugs for the same entity across messages.
 When a source identifies an existing fact using different wording, reuse its key
 and canonical source name from context. Keep competing vendors' options distinct.
+Record a proposed or imposed meal order size at food.quantity. Use food.headcount
+only for the event's authoritative number of people who need meals. Record stated
+baseline counts, prices, duration and budget cap at their canonical fact keys.
+Classify actions a sender claims to have already taken as facts, corrections or
+instructions. Reserve proposals for requests for approval and tentative ideas.
 For a requirement emit kind rule, area owning the value, and key pointing to the
 plan field it tests (e.g. venue.features contains a feature slug). Generic plan
 fields include venue.capacity/cost/features, food.quantity/features/cost,
@@ -101,12 +106,16 @@ def call(messages: list[dict], schema: dict, name: str, number: int, timeout: fl
     }
     async def request_completion():
         async with asyncio.timeout(timeout):
-            async with AsyncGroq(api_key=key, timeout=timeout, max_retries=0) as client:
+            async with AsyncGroq(
+                api_key=key, base_url="https://api.groq.com", timeout=timeout, max_retries=0,
+            ) as client:
                 return await client.chat.completions.with_raw_response.create(**request)
 
     try:
         raw = asyncio.run(request_completion())
+        event["status"] = raw.status_code
         event["rate_limits"] = rate_headers(raw.headers)
+        event["input"] = json.loads(raw.http_response.request.content)
         event["output"] = raw.http_response.json()
         event["model"] = event["output"].get("model", MODEL)
         event["usage"] = event["output"].get("usage")

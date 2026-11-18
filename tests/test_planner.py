@@ -3,7 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from constraintos.engine import apply_message, merge
+from constraintos.engine import apply_message, merge, quote_span
 from constraintos.planner import build
 from constraintos.schema import Fact, Message
 from constraintos.state import load, save
@@ -38,6 +38,11 @@ def base():
 
 
 class PlannerTests(unittest.TestCase):
+    def test_quote_matching_preserves_windows_newlines(self):
+        source = "Sender\r\nThe quote is 4.\r\nDelivered."
+        left, right = quote_span(source, "The quote is 4.\nDelivered.")
+        self.assertEqual(source[left:right], "The quote is 4.\r\nDelivered.")
+
     def test_plan_respects_extra_feature_and_exact_cost(self):
         plan, errors = build(base(), [{"key": "venue.features", "operator": "contains", "value": "step_free"}])
         self.assertFalse(errors, errors)
@@ -63,9 +68,42 @@ class PlannerTests(unittest.TestCase):
         self.assertFalse(errors, errors)
         self.assertEqual(plan["schedule"]["activities"]["briefing"]["start"], 25)
 
+    def test_required_end_time_anchors_an_unfixed_schedule(self):
+        rules = [{"key": "schedule.end", "operator": "eq", "value": 750}]
+        plan, errors = build(base() | rows(schedule__activities__meal__start=680), rules)
+        self.assertFalse(errors, errors)
+        self.assertEqual(plan["schedule"]["start"], 645)
+        self.assertEqual(plan["schedule"]["end"], 750)
+        self.assertFalse(plan["schedule"]["relative_times"])
+
     def test_infeasible_update_has_specific_budget_failure(self):
         _, errors = build({**base(), **rows(budget__cap=130)}, [])
         self.assertIn("exceeds budget cap", errors[0])
+
+    def test_rule_can_compare_fields_and_raise_the_default_order_quantity(self):
+        rules = [
+            {"key": "venue.capacity", "operator": "ge", "value": "$food.quantity"},
+            {"key": "food.quantity", "operator": "ge", "value": 46},
+        ]
+        plan, errors = build({**base(), **rows(budget__cap=200)}, rules)
+        self.assertFalse(errors, errors)
+        self.assertEqual(plan["food"]["quantity"], 46)
+        self.assertEqual(plan["venue"]["selected"], "annex")
+
+    def test_schedule_rules_can_use_the_selected_venues_availability(self):
+        facts = base() | rows(
+            venue__options__studio__available_from=650,
+            venue__options__annex__available_from=640,
+            schedule__activities__meal__start=680,
+        )
+        rules = [
+            {"key": "schedule.end", "operator": "eq", "value": 750},
+            {"key": "schedule.start", "operator": "ge", "value": "$venue.available_from"},
+        ]
+        plan, errors = build(facts, rules)
+        self.assertFalse(errors, errors)
+        self.assertEqual(plan["venue"]["selected"], "annex")
+        self.assertEqual(plan["schedule"]["start"], 645)
 
     def test_vendor_quote_date_and_undated_correction(self):
         def quote(value, posted, kind):
@@ -110,3 +148,23 @@ class PlannerTests(unittest.TestCase):
             self.assertIn("does not cover 37", reloaded["rejected"][0]["reason"])
             self.assertTrue((root / "plan.json").is_file())
             self.assertTrue((root / "trace.json").is_file())
+
+    def test_finance_correction_changes_budget_and_keeps_other_areas(self):
+        facts = base()
+        prior = facts["budget.commitments.signage"]
+        prior.update(source="Finance", date="--09-05", message_id="previous")
+        plan, errors = build(facts, [])
+        self.assertFalse(errors, errors)
+        state = {"facts": facts, "plan": plan, "rules": {}, "proposals": [],
+                 "messages": [], "rejected": [], "trace": []}
+        evidence = "Finance here. Signage came in at 12.50."
+        apply_message(state, Message(
+            evidence=evidence, source="Finance", date="", disposition="relevant",
+            reason="", facts=[Fact(area="budget", key="budget.commitments.signage", value=12.50,
+                                   kind="correction", authority="owner",
+                                   operator="none", evidence=evidence)],
+        ), False, float("inf"), state["trace"].append)
+        self.assertFalse(state["rejected"], state["rejected"])
+        self.assertEqual(state["plan"]["budget"]["total"] - plan["budget"]["total"], Decimal("5"))
+        for area in ("venue", "schedule", "food", "judging"):
+            self.assertEqual(state["plan"][area], plan[area])

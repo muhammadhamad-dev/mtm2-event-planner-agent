@@ -55,8 +55,10 @@ def requirements(plan, rules):
                     actual, expected = Decimal(str(actual)), Decimal(str(expected))
                 passed = actual is not None and {"eq": eq, "ge": ge, "le": le}[operator](actual, expected)
             elif operator in ("contains", "excludes"):
+                values = expected if isinstance(expected, list) else [expected]
                 passed = isinstance(actual, (list, str)) and (
-                    (expected in actual) == (operator == "contains")
+                    all(value in actual for value in values) if operator == "contains"
+                    else all(value not in actual for value in values)
                 )
             else:
                 errors.append(f"Cannot evaluate rule {key}: {expected}")

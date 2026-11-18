@@ -53,6 +53,22 @@ def quote_span(text, quote, start=0):
     raise ValueError("Quote does not occur in its source text.")
 
 
+def fact_span(text, quote, key):
+    try:
+        return quote_span(text, quote)
+    except ValueError:
+        fragment = quote.rstrip(".,;!?")
+        if key.startswith("budget.commitments."):
+            verb, _, charge = fragment.partition(" ")
+            if (verb.lower() in {"committed", "paid", "ordered", "approved"}
+                    and re.search(rf"\b{verb}\b", text, re.I)
+                    and re.match(r"(?:rs\.?|pkr|usd|[$£€])\s*\d", charge, re.I)):
+                fragment = charge
+        if not fragment.strip() or fragment == quote:
+            raise
+        return quote_span(text, fragment)
+
+
 def timestamp(value):
     if not value:
         return None
@@ -179,6 +195,8 @@ def merge(message, facts, rules):
         if key.split(".", 1)[0] not in AREAS:
             key = f"{fact.area}.{key}"
         original_key = key
+        if fact.kind == "rule" and key in {"venue.required_features", "food.required_features"}:
+            key = key.replace(".required_features", ".features")
         if key in {"schedule.staff", "budget.commitments.staff"}:
             if re.search(r"\bstaff\b", fact.evidence, re.I) and not re.search(r"\b(?:rs|pkr|usd)\b|[$£€]", fact.evidence, re.I):
                 key = "judging.staff"
@@ -196,13 +214,7 @@ def merge(message, facts, rules):
         try:
             if not fact.evidence.strip():
                 raise ValueError("Empty quote.")
-            try:
-                start, end = quote_span(message.evidence, fact.evidence)
-            except ValueError:
-                fragment = fact.evidence.rstrip(".,;!?")
-                if not fragment.strip() or fragment == fact.evidence:
-                    raise
-                start, end = quote_span(message.evidence, fragment)
+            start, end = fact_span(message.evidence, fact.evidence, key)
         except ValueError:
             raise ValueError(f"Evidence for {key} does not occur in the source message.")
         if isinstance(value, float) and not math.isfinite(value):

@@ -53,6 +53,9 @@ judging.honorarium, judging.minimum_judges
 budget.cap, budget.currency, budget.commitments.<slug>
 Use absolute minutes from midnight for clock times, minutes for durations, numeric
 amounts in the stated budget currency and feature names as lowercase stable slugs.
+Use numeric values for all prices and fees. Included delivery has zero additional
+fixed cost. When citing a list of charges, quote the exact contiguous amount and
+expense name for each item. Copy the conjunction when it falls inside the quote.
 Bundle no fields together. Use stable slugs for the same entity across messages.
 Emit whole counts and minutes as integers, without decimal points.
 When a source identifies an existing fact using different wording, reuse its key
@@ -69,8 +72,9 @@ Put unapproved proposals in kind "proposal". Use area "proposal" and key
 "proposal" if there is no applicable planning area. Approved costs alone belong
 in budget commitments.
 For a requirement emit kind rule, area owning the value, and key pointing to the
-plan field it tests (e.g. venue.features contains a feature slug). Generic plan
-fields include venue.capacity/cost/features, food.quantity/features/cost,
+plan field it tests. Use venue.features or food.features with contains or excludes
+and a single feature slug. Generic plan fields include venue.capacity/cost/features,
+food.quantity/features/cost,
 schedule.event_minutes/activities.<slug>.minutes, judging.team_capacity and
 budget.total/remaining. Use other semantic paths for novel attributes and capture
 their grounded facts on options or plan sections. Use eq/ge/le/contains/excludes.

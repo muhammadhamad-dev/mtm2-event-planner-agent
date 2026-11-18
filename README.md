@@ -21,7 +21,7 @@ State, plan and trace live in the ignored `.constraintos/` directory. Submit `pl
 
 ## Predicting model calls
 
-Every fresh input file sent to the provider uses one call tagged `reading`. Duplicate files already processed from the same state use zero calls. Python records which plan areas the extracted changes affect and checks the resulting candidate for feasibility. Infeasible updates are rejected transactionally.
+Every fresh input file uses the `reading` tag. Groq normally receives one call. A rate-limit response or rejected structured generation can each trigger one traced retry within the time allowance. Duplicate files already processed from the same state use zero calls. Python records which plan areas the extracted changes affect and checks the resulting candidate for feasibility. Infeasible updates are rejected transactionally.
 
 The provider trace shows request and response data, model, latency, rate-limit headers, and token usage as reported by Groq. Failed calls can lack usage. No fallback runs automatically.
 

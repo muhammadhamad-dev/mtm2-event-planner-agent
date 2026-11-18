@@ -1,6 +1,8 @@
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, WithJsonSchema
+
+NumericValue = Annotated[int | float, WithJsonSchema({"type": "number"})]
 
 
 class Record(BaseModel):
@@ -8,9 +10,9 @@ class Record(BaseModel):
 
 
 class Fact(Record):
-    area: Literal["venue", "schedule", "food", "judging", "budget"]
+    area: str
     key: str
-    value: str | int | float | bool | list[str] | None
+    value: str | NumericValue | bool | list[str] | None
     kind: Literal["fact", "rule", "proposal", "correction", "instruction"]
     authority: Literal["owner", "participant", "unknown"]
     operator: Literal["eq", "ge", "le", "contains", "excludes", "none"]

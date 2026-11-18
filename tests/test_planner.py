@@ -157,11 +157,11 @@ class PlannerTests(unittest.TestCase):
         self.assertFalse(errors, errors)
         state = {"facts": facts, "plan": plan, "rules": {}, "proposals": [],
                  "messages": [], "rejected": [], "trace": []}
-        evidence = "Finance here. Signage came in at 12.50."
+        evidence = "Finance here. Signage came in at 12.50, not 7.50."
         apply_message(state, Message(
             evidence=evidence, source="Finance", date="", disposition="relevant",
             reason="", facts=[Fact(area="budget", key="budget.commitments.signage", value=12.50,
-                                   kind="correction", authority="owner",
+                                   kind="fact", authority="owner",
                                    operator="none", evidence=evidence)],
         ), False, float("inf"), state["trace"].append)
         self.assertFalse(state["rejected"], state["rejected"])

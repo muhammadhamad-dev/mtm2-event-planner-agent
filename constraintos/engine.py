@@ -28,9 +28,9 @@ def quote_span(text, quote, start=0):
     exact = text.find(quote, start)
     if exact >= 0:
         return exact, exact + len(quote)
-    # Match newline style differences while saving the original source characters.
-    lines = re.split(r"\r\n|\r|\n", quote)
-    pattern = r"(?:\r\n|\r|\n)".join(map(re.escape, lines))
+    # Match PDF wraps and newline styles while saving original source characters.
+    pieces = re.split(r"(\s+)", quote)
+    pattern = "".join(r"\s+" if part.isspace() else re.escape(part) for part in pieces)
     match = re.compile(pattern).search(text, start)
     if match:
         return match.span()
@@ -50,6 +50,16 @@ def older(incoming, previous):
     if incoming.startswith("--") or previous.startswith("--"):
         return (first.month, first.day) < (second.month, second.day)
     return first < second
+
+
+def cites_replaced_amount(evidence, old_value):
+    if type(old_value) not in (int, float):
+        return False
+    marker = re.search(r"\b(?:not|instead of|rather than|nahi|nahin|ki jagah)\b", evidence, re.I)
+    if marker is None:
+        return False
+    amounts = re.findall(r"\d[\d,]*(?:\.\d+)?", evidence[marker.end():])
+    return any(float(amount.replace(",", "")) == old_value for amount in amounts)
 
 
 def dependencies(changed, rules):
@@ -96,17 +106,31 @@ def merge(message, facts, rules):
     timestamp(message.date)
     for fact in message.facts:
         key, value = fact.key, fact.value
+        declared_area = fact.area.split(".", 1)[0]
+        if key.split(".", 1)[0] not in AREAS:
+            key = f"{fact.area}.{key}"
+        original_key = key
+        if key in {"schedule.staff", "budget.commitments.staff"}:
+            if re.search(r"\bstaff\b", fact.evidence, re.I) and not re.search(r"\b(?:rs|pkr|usd)\b|[$£€]", fact.evidence, re.I):
+                key = "judging.staff"
+        if key == "budget.commitments.honorarium" and re.search(r"\b(?:each|per judge)\b", fact.evidence, re.I):
+            key = "judging.honorarium"
+        area = key.split(".", 1)[0]
         try:
             if not fact.evidence.strip():
                 raise ValueError("Empty quote.")
-            start, end = quote_span(message.evidence, fact.evidence)
+            try:
+                start, end = quote_span(message.evidence, fact.evidence)
+            except ValueError:
+                fragment = fact.evidence.rstrip(".,;!?")
+                if not fragment.strip() or fragment == fact.evidence:
+                    raise
+                start, end = quote_span(message.evidence, fragment)
         except ValueError:
             raise ValueError(f"Evidence for {key} does not occur in the source message.")
-        if not KEY.fullmatch(key) or not key.startswith(fact.area + "."):
-            raise ValueError(f"Invalid or mismatched planning key {key!r}.")
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"Invalid numeric value for {key}.")
-        row = {**fact.model_dump(), "evidence": message.evidence[start:end],
+        row = {**fact.model_dump(), "key": key, "area": area, "evidence": message.evidence[start:end],
                "source": message.source, "date": message.date,
                "message_id": digest(message.evidence)}
         if fact.kind == "proposal":
@@ -116,6 +140,9 @@ def merge(message, facts, rules):
         if fact.authority != "owner" or not message.source.strip():
             notes.append(f"Insufficient source authority for {key}.")
             continue
+        if (not KEY.fullmatch(key) or area not in AREAS
+                or (area != declared_area and key == original_key)):
+            raise ValueError(f"Invalid or mismatched planning key {key!r}.")
         if fact.kind == "rule":
             # Keep independent limits and feature requirements from different sources.
             # A dated revision by the same owner can replace its previous limit.
@@ -139,12 +166,17 @@ def merge(message, facts, rules):
                 raise ValueError(f"Conflicting claims for {key} from {prior['source']} and {message.source}.")
             if message.date and prior["date"] and not older(prior["date"], message.date) and fact.kind != "correction":
                 raise ValueError(f"Conflicting claims for {key} on the same date.")
-            if not message.date and prior["date"] and fact.kind not in {"correction", "instruction"}:
+            explicit_replacement = (
+                prior["source"].casefold() == message.source.casefold()
+                and cites_replaced_amount(message.evidence, prior["value"])
+            )
+            if (not message.date and prior["date"] and fact.kind not in {"correction", "instruction"}
+                    and not explicit_replacement):
                 raise ValueError(f"Undated claim cannot supersede the dated value for {key}.")
             row["supersedes"] = prior["message_id"]
             notes.append(f"Superseded {key} from {prior['source']} ({prior['date'] or 'undated'}).")
         target[identity] = row
-        changed.add(fact.area)
+        changed.add(area)
     return changed, proposals, notes
 
 
@@ -207,14 +239,33 @@ def run(raw, root=Path(".constraintos"), output=print):
 
         initializing = state["plan"] is None
         deadline = started + (114 if initializing else 55)
-        timeout = deadline - time.monotonic() - 4
-        context = [
-            {field: item[field] for field in ("key", "value", "source", "date")}
-            for item in (*state["facts"].values(), *state["rules"].values())
-        ]
+        context = {}
+        for item in (*state["facts"].values(), *state["rules"].values()):
+            context.setdefault(item["source"], []).append(item["key"])
         number = 1 + sum(item["type"] == "model_call" for item in state["trace"])
-        event, content = provider.extract(raw, context, number, timeout)
-        emit(event)
+        schema_retry = rate_retry = False
+        for attempt in range(3):
+            timeout = deadline - time.monotonic() - 4
+            event, content = provider.extract(raw, context, number + attempt, timeout, initializing, schema_retry)
+            emit(event)
+            remaining = deadline - time.monotonic() - 4
+            try:
+                delay = float(event["rate_limits"].get("retry-after", "0"))
+            except ValueError:
+                delay = 0
+            if event.get("status") == 429 and not rate_retry and attempt < 2 and 0 < delay < remaining - 3:
+                rate_retry = True
+                emit({"type": "validation", "status": "rate_limit_retry", "wait_seconds": delay})
+                time.sleep(delay)
+                continue
+            body = event["output"]
+            if (event.get("status") == 400 and not schema_retry and attempt < 2 and remaining > 8
+                    and isinstance(body, dict) and isinstance(body.get("error"), dict)
+                    and body["error"].get("code") == "json_validate_failed"):
+                schema_retry = True
+                emit({"type": "validation", "status": "structured_output_retry"})
+                continue
+            break
         counts = ("prompt_tokens", "completion_tokens", "total_tokens")
         usage = event["usage"] or {}
         if (not isinstance(content, str) or not content or event.get("finish_reason") != "stop"
@@ -230,8 +281,13 @@ def run(raw, root=Path(".constraintos"), output=print):
             for message in messages:
                 if not message.evidence.strip():
                     raise ValueError("Extracted message has no evidence.")
-                start, cursor = quote_span(raw, message.evidence, cursor)
-                message.evidence = raw[start:cursor]
+                start, end = quote_span(raw, message.evidence, cursor)
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", message.date):
+                    year = message.date[:4]
+                    if not re.search(rf"\b{year}\b", raw[cursor:end]):
+                        message.date = "--" + message.date[5:]
+                message.evidence = raw[start:end]
+                cursor = end
             if not messages:
                 raise ValueError("No source messages were extracted.")
         except (ValidationError, ValueError):
